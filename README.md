@@ -6,6 +6,9 @@ KYCortex AI is a real-time, AI-driven KYC (Know Your Customer) platform that ena
 
 ---
 
+##Snapshot
+<img src="Screenshot (1024).png"/>
+
 ## 🧠 Key Features
 
 * 🎥 **Live Video Verification**
