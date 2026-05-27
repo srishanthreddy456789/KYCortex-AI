@@ -3,6 +3,7 @@ import {
   Bot, Mic, Send, User, WifiOff, Wifi,
   Volume2, VolumeX, RefreshCw, AlertTriangle,
 } from "lucide-react";
+import { BACKEND_WS } from "@/lib/config";
 
 type Sender = "ai" | "user";
 interface Message {
@@ -19,8 +20,6 @@ interface ChatAgentProps {
   onStepChange?: (step: string, data?: any) => void;
   onOcrResult?: (docType: string, data: any) => void;
 }
-
-const BACKEND_WS = "ws://localhost:8000";
 const now = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 // ── TTS helper ─────────────────────────────────────────────────────────────────

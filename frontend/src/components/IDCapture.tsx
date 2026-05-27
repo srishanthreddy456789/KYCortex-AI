@@ -31,7 +31,9 @@ interface IDCaptureProps {
   panResult?: OCRResult | null;
 }
 
-const BACKEND_URL = "http://localhost:8000";
+import { BACKEND_HTTP } from "@/lib/config";
+
+const BACKEND_URL = BACKEND_HTTP;
 
 // ── Step config ────────────────────────────────────────────────────────────────
 const STEP_CONFIG: Record<string, {

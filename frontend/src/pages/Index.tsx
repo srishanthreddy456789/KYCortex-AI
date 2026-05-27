@@ -7,8 +7,9 @@ import { VideoCapture } from "@/components/VideoCapture";
 import { ChatAgent } from "@/components/ChatAgent";
 import { IDCapture, type OCRResult } from "@/components/IDCapture";
 import { toast } from "sonner";
+import { BACKEND_HTTP } from "@/lib/config";
 
-const BACKEND_URL = "http://localhost:8000";
+const BACKEND_URL = BACKEND_HTTP;
 
 // ── KYC progress steps shown in UI ────────────────────────────────────────────
 const PROGRESS_STEPS = [
