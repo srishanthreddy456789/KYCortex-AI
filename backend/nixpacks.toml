@@ -1,9 +1,7 @@
 [phases.setup]
-# Install Tesseract OCR and Python 3.12 at system level via Nix packages
-nixPkgs = ["tesseract", "python312", "python312Packages.pip"]
-
-[phases.install]
-cmds = ["pip install -r requirements.txt"]
+# Only install Tesseract as a system package.
+# Nixpacks auto-detects Python from requirements.txt and handles pip itself.
+nixPkgs = ["tesseract"]
 
 [start]
 cmd = "uvicorn app:app --host 0.0.0.0 --port $PORT"
