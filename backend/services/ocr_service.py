@@ -1,25 +1,22 @@
 """
-KYCortex AI — OCR Service
-Extracts structured fields from ID document images using pytesseract.
-Supports: Aadhaar, PAN, Driving License, Passport, Voter ID
+KYCortex AI — OCR Service v2
+Dedicated extraction and validation for Aadhaar and PAN cards.
 """
 import re
-import sys
+import os
 import platform
 from typing import Optional
 from PIL import Image
 
+# ── Tesseract setup ──────────────────────────────────────────────────────────
 try:
     import pytesseract
-    # Auto-detect Tesseract path on Windows
     if platform.system() == "Windows":
-        import os
-        common_paths = [
+        for p in [
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
             r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
             r"C:\Users\asus\AppData\Local\Programs\Tesseract-OCR\tesseract.exe",
-        ]
-        for p in common_paths:
+        ]:
             if os.path.exists(p):
                 pytesseract.pytesseract.tesseract_cmd = p
                 break
@@ -30,167 +27,29 @@ except ImportError:
 from utils.helpers import preprocess_image, clean_text
 
 
-# --------------------------------------------------------------------------- #
-#  Document type detection
-# --------------------------------------------------------------------------- #
-def _detect_document_type(text: str) -> str:
-    text_up = text.upper()
-    if re.search(r"\bAADHAAR\b|\bUIDAI\b|\bUID\b|\bAadhaar\b", text, re.IGNORECASE):
-        return "Aadhaar Card"
-    if re.search(r"\bPERMANENT ACCOUNT NUMBER\b|\bPAN\b|\bINCOME TAX\b", text_up):
-        return "PAN Card"
-    if re.search(r"\bDRIVING LICEN[CS]E\b|\bDL NO\b|\bD\.L\b", text_up):
-        return "Driving License"
-    if re.search(r"\bPASSPORT\b|\bREPUBLIC OF INDIA\b", text_up):
-        return "Passport"
-    if re.search(r"\bVOTER\b|\bELECTION COMMISSION\b|\bELECTOR\b", text_up):
-        return "Voter ID"
-    return "Identity Document"
+# ── Aadhaar validators ───────────────────────────────────────────────────────
+AADHAAR_RE = re.compile(r"\b(\d{4}\s?\d{4}\s?\d{4})\b")
+PAN_RE      = re.compile(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b")
+DOB_RE      = re.compile(
+    r"(?:DOB|D\.O\.B|Date of Birth|Birth)[:\s/]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})"
+    r"|(\d{2}[\/\-]\d{2}[\/\-]\d{4})",
+    re.IGNORECASE
+)
+NAME_SKIP = {
+    "GOVERNMENT", "INDIA", "REPUBLIC", "AADHAAR", "PERMANENT",
+    "ACCOUNT", "NUMBER", "DRIVING", "LICENSE", "LICENCE", "VOTER",
+    "ELECTION", "COMMISSION", "PASSPORT", "INCOME", "TAX", "DEPARTMENT",
+    "UNIQUE", "IDENTIFICATION", "AUTHORITY", "ENROLMENT",
+}
 
 
-# --------------------------------------------------------------------------- #
-#  Field parsers
-# --------------------------------------------------------------------------- #
-def _extract_name(text: str, doc_type: str) -> Optional[str]:
-    """Extract full name from OCR text."""
-    patterns = [
-        r"(?:Name|NAME)[:\s]+([A-Z][a-zA-Z\s]{2,40})",
-        r"(?:नाम)[:\s]+([A-Za-z\s]{2,40})",
-        # PAN card — name is typically on 4th line
-        r"^([A-Z][A-Z\s]{5,30})$",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.MULTILINE)
-        if m:
-            name = m.group(1).strip()
-            name = re.sub(r"\s+", " ", name)
-            if 3 <= len(name) <= 50 and not any(d.isdigit() for d in name):
-                return name.title()
-    # Fallback: find two consecutive capitalized words not part of known headers
-    skip_words = {"GOVERNMENT", "INDIA", "REPUBLIC", "AADHAAR", "PERMANENT", "ACCOUNT",
-                  "NUMBER", "DRIVING", "LICENSE", "LICENCE", "VOTER", "ELECTION",
-                  "COMMISSION", "PASSPORT", "INCOME", "TAX", "DEPARTMENT"}
-    lines = text.splitlines()
-    for line in lines:
-        line = line.strip()
-        words = line.split()
-        if 2 <= len(words) <= 4:
-            if all(w.replace(".", "").isalpha() and len(w) >= 2 for w in words):
-                if not any(w.upper() in skip_words for w in words):
-                    return line.title()
-    return None
-
-
-def _extract_dob(text: str) -> Optional[str]:
-    """Extract date of birth."""
-    patterns = [
-        r"(?:DOB|D\.O\.B|Date of Birth|Birth)[:\s/]*(\d{2}[\/\-]\d{2}[\/\-]\d{4})",
-        r"(\d{2}[\/\-]\d{2}[\/\-]\d{4})",
-        r"(\d{4}[\/\-]\d{2}[\/\-]\d{2})",
-        r"(?:Year of Birth|YOB)[:\s]*(\d{4})",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            return m.group(1).strip()
-    return None
-
-
-def _extract_id_number(text: str, doc_type: str) -> Optional[str]:
-    """Extract the document ID number."""
-    # Aadhaar: 12 digits in groups of 4
-    m = re.search(r"\b(\d{4}\s\d{4}\s\d{4})\b", text)
-    if m:
-        return m.group(1)
-
-    # PAN: ABCDE1234F
-    m = re.search(r"\b([A-Z]{5}[0-9]{4}[A-Z])\b", text)
-    if m:
-        return m.group(1)
-
-    # Passport: A1234567
-    m = re.search(r"\b([A-Z]\d{7})\b", text)
-    if m:
-        return m.group(1)
-
-    # Driving License: state code + digits
-    m = re.search(r"\b([A-Z]{2}[-\s]?\d{2}[-\s]?\d{4,7})\b", text)
-    if m:
-        return m.group(1)
-
-    # Generic: 8-16 digit number
-    m = re.search(r"\b(\d{8,16})\b", text)
-    if m:
-        return m.group(1)
-
-    return None
-
-
-def _extract_address(text: str) -> Optional[str]:
-    """Extract address block."""
-    patterns = [
-        r"(?:Address|ADDRESS|Addr)[:\s]+([\s\S]{10,200}?)(?:\n\n|\Z|(?:PIN|Pincode|PINCODE))",
-        r"(?:C/O|S/O|D/O|W/O)[,\s]+([\s\S]{10,150}?)(?:\n\n|\Z)",
-    ]
-    for pat in patterns:
-        m = re.search(pat, text, re.IGNORECASE)
-        if m:
-            addr = m.group(1).strip()
-            addr = re.sub(r"\s+", " ", addr)
-            if len(addr) > 10:
-                return addr[:200]
-    return None
-
-
-def _extract_gender(text: str) -> Optional[str]:
-    """Extract gender."""
-    m = re.search(r"\b(Male|Female|MALE|FEMALE|M|F)\b", text)
-    if m:
-        val = m.group(1).upper()
-        if val in ("M", "MALE"):
-            return "Male"
-        if val in ("F", "FEMALE"):
-            return "Female"
-    return None
-
-
-def _extract_pincode(text: str) -> Optional[str]:
-    """Extract PIN code."""
-    m = re.search(r"\b(\d{6})\b", text)
-    if m:
-        return m.group(1)
-    return None
-
-
-# --------------------------------------------------------------------------- #
-#  Main extraction function
-# --------------------------------------------------------------------------- #
-def extract_fields(image: Image.Image) -> dict:
-    """
-    Run OCR on the given PIL image and extract structured KYC fields.
-    Returns a dict with all extracted data.
-    """
+def _run_ocr(image: Image.Image) -> tuple[str, float]:
+    """Run Tesseract on the image, try multiple configs, return best (text, confidence)."""
     if not TESSERACT_AVAILABLE:
-        return {
-            "error": "Tesseract OCR is not installed. Please install it from https://github.com/UB-Mannheim/tesseract/wiki",
-            "raw_text": "",
-            "confidence": 0,
-        }
-
-    # Preprocess for better accuracy
+        return "", 0.0
     processed = preprocess_image(image)
-
-    # Run OCR with multiple configs and take best
-    configs = [
-        "--oem 3 --psm 6",   # Assume uniform text block
-        "--oem 3 --psm 3",   # Fully automatic page segmentation
-        "--oem 3 --psm 11",  # Sparse text
-    ]
-
-    best_text = ""
-    best_conf = 0.0
-
-    for cfg in configs:
+    best_text, best_conf = "", 0.0
+    for cfg in ["--oem 3 --psm 6", "--oem 3 --psm 3", "--oem 3 --psm 11"]:
         try:
             raw = pytesseract.image_to_string(processed, config=cfg, lang="eng")
             data = pytesseract.image_to_data(
@@ -198,39 +57,181 @@ def extract_fields(image: Image.Image) -> dict:
                 output_type=pytesseract.Output.DICT
             )
             confs = [c for c in data["conf"] if isinstance(c, (int, float)) and c > 0]
-            avg_conf = sum(confs) / len(confs) if confs else 0
-            if avg_conf > best_conf:
-                best_conf = avg_conf
-                best_text = raw
+            avg = sum(confs) / len(confs) if confs else 0
+            if avg > best_conf:
+                best_conf, best_text = avg, raw
         except Exception:
             continue
+    return best_text, best_conf
 
-    if not best_text.strip():
-        return {
-            "error": "Could not extract text from image. Ensure the document is clearly visible.",
-            "raw_text": "",
-            "confidence": 0,
+
+def _extract_name(text: str) -> Optional[str]:
+    # Named patterns
+    for pat in [
+        r"(?:Name|NAME)[:\s]+([A-Z][a-zA-Z\s]{2,40})",
+        r"(?:नाम)[:\s]+([A-Za-z\s]{2,40})",
+    ]:
+        m = re.search(pat, text)
+        if m:
+            name = re.sub(r"\s+", " ", m.group(1).strip())
+            if 3 <= len(name) <= 50 and not any(d.isdigit() for d in name):
+                return name.title()
+    # Heuristic: line with 2-4 all-alpha words not in skip list
+    for line in text.splitlines():
+        words = line.strip().split()
+        if 2 <= len(words) <= 4:
+            if all(w.replace(".", "").isalpha() and len(w) >= 2 for w in words):
+                if not any(w.upper() in NAME_SKIP for w in words):
+                    return " ".join(words).title()
+    return None
+
+
+def _extract_dob(text: str) -> Optional[str]:
+    m = DOB_RE.search(text)
+    if m:
+        return (m.group(1) or m.group(2) or "").strip()
+    # Year-only fallback
+    m2 = re.search(r"(?:Year of Birth|YOB)[:\s]*(\d{4})", text, re.IGNORECASE)
+    if m2:
+        return m2.group(1)
+    return None
+
+
+def _extract_address(text: str) -> Optional[str]:
+    for pat in [
+        r"(?:Address|ADDRESS)[:\s]+([\s\S]{10,200}?)(?:\n\n|\Z|PIN)",
+        r"(?:C/O|S/O|D/O|W/O)[,\s]+([\s\S]{10,150}?)(?:\n\n|\Z)",
+    ]:
+        m = re.search(pat, text, re.IGNORECASE)
+        if m:
+            addr = re.sub(r"\s+", " ", m.group(1).strip())
+            if len(addr) > 10:
+                return addr[:200]
+    return None
+
+
+def _extract_gender(text: str) -> Optional[str]:
+    m = re.search(r"\b(Male|Female|MALE|FEMALE)\b", text, re.IGNORECASE)
+    if m:
+        return m.group(1).capitalize()
+    return None
+
+
+def _extract_pincode(text: str) -> Optional[str]:
+    m = re.search(r"\b(\d{6})\b", text)
+    return m.group(1) if m else None
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def extract_aadhaar(image: Image.Image) -> dict:
+    """
+    Extract and validate Aadhaar card fields.
+    Returns: { valid, id_number, name, dob, address, gender, pincode,
+               raw_text, confidence, error? }
+    """
+    if not TESSERACT_AVAILABLE:
+        return {"valid": False, "error": "Tesseract OCR not installed"}
+
+    raw_text, conf = _run_ocr(image)
+    if not raw_text.strip():
+        return {"valid": False, "error": "no_text", "confidence": 0}
+
+    # Find Aadhaar number
+    m = AADHAAR_RE.search(raw_text)
+    aadhaar_num = m.group(1).replace(" ", " ").strip() if m else None
+
+    # Validate — needs 12 digits
+    digits = re.sub(r"\s", "", aadhaar_num or "")
+    is_valid = bool(aadhaar_num) and len(digits) == 12 and digits.isdigit()
+
+    result = {
+        "valid": is_valid,
+        "id_number": aadhaar_num,
+        "name": _extract_name(raw_text),
+        "dob": _extract_dob(raw_text),
+        "address": _extract_address(raw_text),
+        "gender": _extract_gender(raw_text),
+        "pincode": _extract_pincode(raw_text),
+        "document_type": "Aadhaar Card",
+        "raw_text": clean_text(raw_text),
+        "confidence": round(conf, 1),
+    }
+
+    if not is_valid:
+        result["error"] = "aadhaar_not_found" if not aadhaar_num else "aadhaar_invalid"
+
+    # Flag missing critical fields even if Aadhaar found
+    if is_valid and not result["name"]:
+        result["missing_fields"] = ["name"]
+
+    return result
+
+
+def extract_pan(image: Image.Image) -> dict:
+    """
+    Extract and validate PAN card fields.
+    Returns: { valid, id_number, name, dob, raw_text, confidence, error? }
+    """
+    if not TESSERACT_AVAILABLE:
+        return {"valid": False, "error": "Tesseract OCR not installed"}
+
+    raw_text, conf = _run_ocr(image)
+    if not raw_text.strip():
+        return {"valid": False, "error": "no_text", "confidence": 0}
+
+    m = PAN_RE.search(raw_text)
+    pan_num = m.group(1) if m else None
+
+    is_valid = bool(pan_num) and bool(re.fullmatch(r"[A-Z]{5}[0-9]{4}[A-Z]", pan_num or ""))
+
+    result = {
+        "valid": is_valid,
+        "id_number": pan_num,
+        "name": _extract_name(raw_text),
+        "dob": _extract_dob(raw_text),
+        "document_type": "PAN Card",
+        "raw_text": clean_text(raw_text),
+        "confidence": round(conf, 1),
+    }
+
+    if not is_valid:
+        result["error"] = "pan_not_found" if not pan_num else "pan_invalid"
+
+    return result
+
+
+def extract_fields(image: Image.Image) -> dict:
+    """
+    Generic extractor — tries to detect document type and extract.
+    Used by the /ocr/extract REST endpoint.
+    """
+    if not TESSERACT_AVAILABLE:
+        return {"error": "Tesseract OCR not installed", "raw_text": "", "confidence": 0}
+
+    raw_text, conf = _run_ocr(image)
+    if not raw_text.strip():
+        return {"error": "Could not extract text from image.", "raw_text": "", "confidence": 0}
+
+    text_up = raw_text.upper()
+    if "AADHAAR" in text_up or "UIDAI" in text_up or AADHAAR_RE.search(raw_text):
+        result = extract_aadhaar(image)
+    elif PAN_RE.search(raw_text) or "PERMANENT ACCOUNT NUMBER" in text_up:
+        result = extract_pan(image)
+    else:
+        # Generic
+        result = {
+            "document_type": "Identity Document",
+            "name": _extract_name(raw_text),
+            "dob": _extract_dob(raw_text),
+            "id_number": None,
+            "address": _extract_address(raw_text),
+            "gender": _extract_gender(raw_text),
+            "pincode": _extract_pincode(raw_text),
+            "raw_text": clean_text(raw_text),
+            "confidence": round(conf, 1),
+            "valid": False,
         }
 
-    raw_text = clean_text(best_text)
-    doc_type = _detect_document_type(best_text)
-
-    name = _extract_name(best_text, doc_type)
-    dob = _extract_dob(best_text)
-    id_number = _extract_id_number(best_text, doc_type)
-    address = _extract_address(best_text)
-    gender = _extract_gender(best_text)
-    pincode = _extract_pincode(best_text)
-
-    return {
-        "document_type": doc_type,
-        "name": name,
-        "dob": dob,
-        "id_number": id_number,
-        "address": address,
-        "gender": gender,
-        "pincode": pincode,
-        "raw_text": raw_text,
-        "confidence": round(best_conf, 1),
-        "tesseract_available": True,
-    }
+    result["tesseract_available"] = True
+    return result

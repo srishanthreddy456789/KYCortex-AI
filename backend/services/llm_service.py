@@ -1,100 +1,150 @@
 """
-KYCortex AI — Agent/LLM Service
-Step-based conversational AI agent for guiding the user through KYC verification.
-No external LLM API required — uses a deterministic state machine with rich messages.
+KYCortex AI — Agent/LLM Service (v2)
+New flow: Welcome → Aadhaar → PAN → Face → Confirm → Done
+Voice-friendly messages (no markdown symbols that TTS reads aloud).
+Retry messages for each failed step.
 """
+import random
 from typing import Optional
 
-
-# Step → list of messages the agent can say
+# ---------------------------------------------------------------------------
+# Agent Script — plain text, TTS-friendly (emoji stripped in voice mode on FE)
+# ---------------------------------------------------------------------------
 AGENT_SCRIPT: dict[str, list[str]] = {
+
+    # ── Onboarding ──────────────────────────────────────────────────────────
     "welcome": [
-        "👋 Welcome to KYCortex AI! I'm Cortex, your AI verification assistant. "
-        "Let's complete your KYC in just a few steps. Please ensure you're in a well-lit area.",
-        "Hello! I'm Cortex, your KYC agent. I'll guide you through identity verification. "
-        "Make sure your camera is on and your face is clearly visible.",
+        "Welcome to KYCortex AI! I am Cortex, your AI-powered KYC assistant. "
+        "I will guide you through a quick 3-step identity check: "
+        "first your Aadhaar card, then your PAN card, and finally a face scan. "
+        "Let us begin. Please keep your documents ready and make sure you are in a well-lit area.",
+    ],
+
+    # ── Step 1 — Aadhaar ────────────────────────────────────────────────────
+    "request_aadhaar": [
+        "Step 1 of 3: Aadhaar Card. Please hold your Aadhaar card clearly in front of the camera "
+        "so that all four lines of text are visible, then click Capture ID. "
+        "You may also upload a photo of your Aadhaar using the Upload button.",
+    ],
+    "aadhaar_processing": [
+        "Got it! Reading your Aadhaar card now. Please hold still for a moment.",
+    ],
+    "aadhaar_success": [
+        "Perfect! Your Aadhaar card has been scanned successfully. "
+        "I have extracted your name, date of birth, and Aadhaar number.",
+    ],
+    "aadhaar_retry": [
+        "I could not read your Aadhaar card clearly. Please try again. "
+        "Make sure the card is flat, fully visible, and there is no glare or shadow on it. "
+        "All four rows of digits on the Aadhaar must be readable.",
+        "Hmm, the Aadhaar scan was not clear. "
+        "Please retake the photo with better lighting and make sure the full card fits in the frame.",
+        "I was unable to detect a valid 12-digit Aadhaar number. "
+        "Please capture the front face of your Aadhaar card and try again.",
+    ],
+    "aadhaar_missing_field": [
+        "I scanned the card but could not read all the required fields. "
+        "Could you please retake the photo ensuring the name, date of birth, "
+        "and the 12-digit Aadhaar number are all clearly visible?",
+    ],
+
+    # ── Step 2 — PAN ────────────────────────────────────────────────────────
+    "request_pan": [
+        "Excellent! Step 2 of 3: PAN Card. Now please hold your PAN card in front of the camera. "
+        "Make sure the 10-character PAN number and your name are clearly visible, "
+        "then click Capture ID or Upload.",
+    ],
+    "pan_processing": [
+        "Reading your PAN card now. Please keep still.",
+    ],
+    "pan_success": [
+        "Your PAN card has been verified successfully. "
+        "I have noted your PAN number and date of birth.",
+    ],
+    "pan_retry": [
+        "I could not read your PAN card clearly. "
+        "Please retake the photo. The 10-character PAN number like A B C D E 1 2 3 4 F must be visible.",
+        "The PAN scan was not successful. "
+        "Please ensure the card is well-lit, flat, and the text is not blurry or cut off.",
+        "Hmm, I did not detect a valid PAN number. "
+        "Please try capturing the PAN card again with the full card in frame.",
+    ],
+    "pan_missing_field": [
+        "I could see the PAN card but the PAN number was not clear. "
+        "Please retake the photo making sure the 10-character PAN number at the top is fully visible.",
+    ],
+
+    # ── Step 3 — Face ───────────────────────────────────────────────────────
+    "request_face": [
+        "Almost done! Step 3 of 3: Face Verification. "
+        "Please look directly at the camera and hold still. "
+        "I will automatically detect your face and verify your liveness. "
+        "Make sure your face is fully visible and the room is well lit.",
     ],
     "face_check": [
-        "✅ Great — I can see your face clearly. Please stay still for a moment while I run liveness checks.",
-        "📸 Face detected! Hold steady. I'm verifying your identity signals now.",
-        "🔍 Liveness check in progress. Please look directly at the camera.",
+        "I can see your face. Please hold still while I complete the liveness check.",
     ],
-    "request_id": [
-        "🪪 Now, please hold your ID card (Aadhaar, PAN, Driving License, or Passport) "
-        "clearly in front of the camera and click 'Capture ID'.",
-        "📄 Almost there! Please present your government-issued ID to the camera. "
-        "Make sure all text is visible and the document lies flat.",
+    "face_verified": [
+        "Face verified! Your liveness check is complete.",
     ],
-    "id_processing": [
-        "⏳ Analyzing your document... Please wait a moment.",
-        "🔬 Running OCR extraction on your ID. This takes just a second.",
+    "face_retry": [
+        "I cannot detect your face clearly. "
+        "Please make sure your full face is visible in the camera frame "
+        "and the room is well lit. Remove any glasses or mask if possible.",
+        "Face detection failed. Please position yourself so your face fills the center of the video frame "
+        "and try again.",
+        "I am having trouble seeing your face. "
+        "Please check that your camera is on, face is centered, and lighting is good.",
     ],
+
+    # ── Confirm & Done ───────────────────────────────────────────────────────
     "confirm": [
-        "✅ Document verified successfully! I've extracted your details. "
-        "Please review the information shown and click 'Submit KYC' to proceed.",
-        "🎉 All checks passed! Your identity details have been extracted. "
-        "Review and confirm to complete your KYC.",
+        "All three checks are complete! "
+        "I have your Aadhaar details, PAN details, and your face has been verified. "
+        "Please review the information shown on screen and click Submit KYC to finish.",
     ],
     "done": [
-        "🏁 KYC process complete! Your application has been submitted for review. "
-        "You'll receive a confirmation shortly. Thank you for using KYCortex AI!",
-        "✅ All done! Your KYC submission is under review. "
-        "Loan eligibility results will be shared within 24 hours.",
+        "KYC process complete! Your application has been submitted for review. "
+        "You will receive a confirmation shortly. Thank you for using KYCortex AI!",
     ],
-    "face_not_detected": [
-        "⚠️ I can't detect your face clearly. Please ensure:\n"
-        "• Your face is fully visible and not obscured\n"
-        "• The room is well lit\n"
-        "• You're not too far from the camera",
-    ],
-    "ocr_success": [
-        "✅ Document scanned successfully! I can see your details clearly.",
-    ],
-    "ocr_failed": [
-        "❌ I had trouble reading your document. Please:\n"
-        "• Hold the document flat and steady\n"
-        "• Ensure good lighting with no glare\n"
-        "• Make sure all text is visible\n"
-        "Then try capturing again.",
-    ],
-    "loan_eligible": [
-        "💰 Great news! Based on your profile, you appear to be eligible for loan products. "
-        "Our team will reach out with personalized offers.",
+
+    # ── Fallback ──────────────────────────────────────────────────────────────
+    "user_reply": [
+        "I understand. Let me continue guiding you.",
+        "Sure! Let me know if you need any help.",
+        "Got it. Please follow the instructions shown on screen.",
     ],
     "error": [
-        "⚠️ Something went wrong. Please try again or refresh the page.",
+        "Something went wrong. Please try again or refresh the page.",
     ],
 }
 
-import random
 
-def get_agent_message(step: str, ocr_data: Optional[dict] = None) -> str:
+def get_agent_message(step: str, ocr_data: Optional[dict] = None, doc_type: Optional[str] = None) -> str:
     """
     Get the appropriate AI agent message for the current step.
-    If ocr_data is provided and step is 'confirm', include extracted fields.
+    Optionally inject extracted OCR fields into confirm/success messages.
     """
     messages = AGENT_SCRIPT.get(step, AGENT_SCRIPT["error"])
     msg = random.choice(messages)
 
-    # Enhance confirm message with actual OCR data
+    # Inject OCR data into confirm message
     if step == "confirm" and ocr_data:
         fields = []
-        if ocr_data.get("name"):
-            fields.append(f"**Name:** {ocr_data['name']}")
-        if ocr_data.get("dob"):
-            fields.append(f"**Date of Birth:** {ocr_data['dob']}")
-        if ocr_data.get("id_number"):
-            fields.append(f"**ID Number:** {ocr_data['id_number']}")
-        if ocr_data.get("document_type"):
-            fields.append(f"**Document:** {ocr_data['document_type']}")
-        if ocr_data.get("gender"):
-            fields.append(f"**Gender:** {ocr_data['gender']}")
+        if ocr_data.get("aadhaar", {}).get("name"):
+            fields.append(f"Name: {ocr_data['aadhaar']['name']}")
+        if ocr_data.get("aadhaar", {}).get("id_number"):
+            fields.append(f"Aadhaar: {ocr_data['aadhaar']['id_number']}")
+        if ocr_data.get("pan", {}).get("id_number"):
+            fields.append(f"PAN: {ocr_data['pan']['id_number']}")
+        if ocr_data.get("aadhaar", {}).get("dob"):
+            fields.append(f"Date of Birth: {ocr_data['aadhaar']['dob']}")
         if fields:
-            msg += "\n\nExtracted details:\n" + "\n".join(fields)
+            msg += " Here is what I captured: " + ", ".join(fields) + "."
 
     return msg
 
 
 def get_step_message(step: str) -> str:
-    """Simple alias — returns agent message for a given step."""
+    """Simple alias."""
     return get_agent_message(step)

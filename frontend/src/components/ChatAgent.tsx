@@ -1,5 +1,8 @@
 import { useEffect, useRef, useState, useCallback } from "react";
-import { Bot, Mic, Send, User, WifiOff, Wifi } from "lucide-react";
+import {
+  Bot, Mic, Send, User, WifiOff, Wifi,
+  Volume2, VolumeX, RefreshCw, AlertTriangle,
+} from "lucide-react";
 
 type Sender = "ai" | "user";
 interface Message {
@@ -7,23 +10,49 @@ interface Message {
   text: string;
   sender: Sender;
   time: string;
+  type?: string;
+  retriesLeft?: number;
 }
 
 interface ChatAgentProps {
   sessionId?: string | null;
+  onStepChange?: (step: string, data?: any) => void;
+  onOcrResult?: (docType: string, data: any) => void;
 }
 
 const BACKEND_WS = "ws://localhost:8000";
+const now = () => new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-const now = () =>
-  new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+// ── TTS helper ────────────────────────────────────────────────────────────────
+function speakText(text: string, voiceEnabled: boolean) {
+  if (!voiceEnabled || !window.speechSynthesis) return;
+  // Strip emoji and markdown for cleaner TTS
+  const clean = text
+    .replace(/[\u{1F300}-\u{1FAFF}]/gu, "")
+    .replace(/\*\*/g, "")
+    .replace(/•/g, ",")
+    .trim();
+  if (!clean) return;
+  window.speechSynthesis.cancel();
+  const utter = new SpeechSynthesisUtterance(clean);
+  utter.rate  = 0.95;
+  utter.pitch = 1.0;
+  utter.volume = 1.0;
+  // Prefer a natural English voice
+  const voices = window.speechSynthesis.getVoices();
+  const preferred = voices.find(v =>
+    v.lang.startsWith("en") && (v.name.includes("Google") || v.name.includes("Natural") || v.name.includes("Neural"))
+  ) || voices.find(v => v.lang.startsWith("en")) || null;
+  if (preferred) utter.voice = preferred;
+  window.speechSynthesis.speak(utter);
+}
 
-export const ChatAgent = ({ sessionId }: ChatAgentProps) => {
+export const ChatAgent = ({ sessionId, onStepChange, onOcrResult }: ChatAgentProps) => {
   const [messages, setMessages] = useState<Message[]>([
     {
       id: 1,
       sender: "ai",
-      text: "Welcome to KYCortex AI. Connecting to Cortex agent...",
+      text: "Welcome to KYCortex AI. Connecting to your AI agent...",
       time: now(),
     },
   ]);
@@ -31,61 +60,64 @@ export const ChatAgent = ({ sessionId }: ChatAgentProps) => {
   const [typing, setTyping] = useState(false);
   const [listening, setListening] = useState(false);
   const [connected, setConnected] = useState(false);
-  const scrollRef = useRef<HTMLDivElement>(null);
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const scrollRef   = useRef<HTMLDivElement>(null);
   const recognitionRef = useRef<any>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const faceThrottleRef = useRef<number>(0);
 
-  const addMessage = useCallback((text: string, sender: Sender) => {
-    setMessages((m) => [
-      ...m,
-      { id: Date.now() + Math.random(), sender, text, time: now() },
-    ]);
-  }, []);
+  const addMessage = useCallback((text: string, sender: Sender, extra?: Partial<Message>) => {
+    const msg: Message = {
+      id: Date.now() + Math.random(),
+      sender,
+      text,
+      time: now(),
+      ...extra,
+    };
+    setMessages(m => [...m, msg]);
+    if (sender === "ai") speakText(text, voiceEnabled);
+    return msg;
+  }, [voiceEnabled]);
 
-  // ---- WebSocket connection ------------------------------------------------
+  // ── WebSocket ───────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!sessionId) return;
 
     const ws = new WebSocket(`${BACKEND_WS}/kyc/ws/${sessionId}`);
     wsRef.current = ws;
 
-    ws.onopen = () => {
-      setConnected(true);
-    };
+    ws.onopen = () => setConnected(true);
 
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
+        const { type, message, step, doc_type, data: ocrData, retries_left } = data;
 
-        if (data.type === "AGENT_MESSAGE" || data.type === "STEP_CHANGE") {
-          if (data.message) {
+        if (type === "AGENT_MESSAGE" || type === "STEP_CHANGE") {
+          if (message) {
             setTyping(true);
             setTimeout(() => {
-              addMessage(data.message, "ai");
+              addMessage(message, "ai", { type });
               setTyping(false);
-            }, 600);
+              if (step) onStepChange?.(step, data);
+            }, 400);
           }
-        } else if (data.type === "OCR_RESULT") {
-          // OCR result is handled by IDCapture, but we can show a summary
-          const d = data.data;
-          const fields = [
-            d.name && `Name: ${d.name}`,
-            d.dob && `DOB: ${d.dob}`,
-            d.id_number && `ID: ${d.id_number}`,
-            d.document_type && `Doc: ${d.document_type}`,
-          ]
-            .filter(Boolean)
-            .join(" · ");
-          if (fields) {
-            addMessage(`📄 Document scanned! ${fields}`, "ai");
-          }
-        } else if (data.type === "ERROR") {
-          addMessage(`⚠️ ${data.message}`, "ai");
+        } else if (type === "RETRY_REQUEST") {
+          setTyping(true);
+          setTimeout(() => {
+            addMessage(message, "ai", { type: "retry", retriesLeft: retries_left });
+            setTyping(false);
+            if (step) onStepChange?.(step, data);
+          }, 400);
+        } else if (type === "OCR_RESULT") {
+          onOcrResult?.(doc_type, ocrData);
+        } else if (type === "FACE_STATUS") {
+          // Silently update — no chat message for face status noise
+        } else if (type === "ERROR") {
+          addMessage(`⚠️ ${message}`, "ai");
         }
-        // FACE_STATUS events are silent — no need to spam chat
       } catch {
-        // ignore parse errors
+        /* ignore */
       }
     };
 
@@ -97,106 +129,74 @@ export const ChatAgent = ({ sessionId }: ChatAgentProps) => {
     ws.onerror = () => {
       setConnected(false);
       addMessage(
-        "⚠️ Could not connect to the AI agent. Please ensure the backend is running on port 8000.",
+        "I could not connect to the AI agent. Please make sure the backend is running on port 8000.",
         "ai"
       );
     };
 
-    return () => {
-      ws.close();
-    };
-  }, [sessionId, addMessage]);
+    return () => ws.close();
+  }, [sessionId, addMessage, onStepChange, onOcrResult]);
 
-  // ---- Auto scroll ---------------------------------------------------------
+  // Expose ws for face/id events
   useEffect(() => {
-    scrollRef.current?.scrollTo({
-      top: scrollRef.current.scrollHeight,
-      behavior: "smooth",
-    });
+    (window as any).__kyc_ws = wsRef.current;
+  }, [wsRef.current]);
+
+  // ── Auto scroll ─────────────────────────────────────────────────────────────
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, typing]);
 
-  // ---- Send face update to backend ----------------------------------------
-  // Called externally via window event
+  // ── Face update forwarding (throttled 2s) ───────────────────────────────────
   useEffect(() => {
     const handler = (e: CustomEvent) => {
-      const now = Date.now();
-      if (now - faceThrottleRef.current < 2000) return; // throttle to 1 per 2s
-      faceThrottleRef.current = now;
+      const t = Date.now();
+      if (t - faceThrottleRef.current < 2000) return;
+      faceThrottleRef.current = t;
       const ws = wsRef.current;
       if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({ type: "FACE_UPDATE", confidence: e.detail.confidence })
-        );
+        ws.send(JSON.stringify({ type: "FACE_UPDATE", confidence: e.detail.confidence }));
       }
     };
     window.addEventListener("kyc-face-update" as any, handler);
     return () => window.removeEventListener("kyc-face-update" as any, handler);
   }, []);
 
-  // ---- Send ID captured event to backend ----------------------------------
-  useEffect(() => {
-    const handler = (e: CustomEvent) => {
-      const ws = wsRef.current;
-      if (ws?.readyState === WebSocket.OPEN) {
-        ws.send(
-          JSON.stringify({ type: "ID_CAPTURED", image: e.detail.image })
-        );
-      }
-    };
-    window.addEventListener("kyc-id-captured" as any, handler);
-    return () => window.removeEventListener("kyc-id-captured" as any, handler);
-  }, []);
-
-  // ---- Mic -----------------------------------------------------------------
+  // ── Mic ─────────────────────────────────────────────────────────────────────
   const toggleMic = () => {
-    const SpeechRecognition =
-      (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-      alert("Speech Recognition is not supported. Try Chrome.");
-      return;
-    }
-    if (listening) {
-      recognitionRef.current?.stop();
-      return;
-    }
-    const recognition = new SpeechRecognition();
-    recognition.lang = "en-US";
-    recognition.interimResults = true;
-    recognition.continuous = false;
-    recognition.onstart = () => setListening(true);
-    recognition.onend = () => setListening(false);
-    recognition.onerror = () => setListening(false);
-    recognition.onresult = (event: any) => {
-      let transcript = "";
-      for (let i = 0; i < event.results.length; i++) {
-        transcript += event.results[i][0].transcript;
-      }
-      setInput(transcript);
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { alert("Speech recognition not supported. Try Chrome."); return; }
+    if (listening) { recognitionRef.current?.stop(); return; }
+    const rec = new SR();
+    rec.lang = "en-IN";
+    rec.interimResults = true;
+    rec.continuous = false;
+    rec.onstart  = () => setListening(true);
+    rec.onend    = () => setListening(false);
+    rec.onerror  = () => setListening(false);
+    rec.onresult = (ev: any) => {
+      let t = "";
+      for (let i = 0; i < ev.results.length; i++) t += ev.results[i][0].transcript;
+      setInput(t);
     };
-    recognitionRef.current = recognition;
-    recognition.start();
+    recognitionRef.current = rec;
+    rec.start();
   };
 
-  // ---- Send message --------------------------------------------------------
+  // ── Send message ─────────────────────────────────────────────────────────────
   const send = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
-
     addMessage(trimmed, "user");
     setInput("");
-
-    // Send to backend via WebSocket
     const ws = wsRef.current;
     if (ws?.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "USER_MESSAGE", text: trimmed }));
       setTyping(true);
     } else {
-      // Offline fallback
-      setTyping(true);
       setTimeout(() => {
-        addMessage("I'm currently offline. Please ensure the backend is running.", "ai");
-        setTyping(false);
-      }, 800);
+        addMessage("I am currently offline. Please ensure the backend is running.", "ai");
+      }, 500);
     }
   };
 
@@ -207,46 +207,50 @@ export const ChatAgent = ({ sessionId }: ChatAgentProps) => {
         <div className="flex items-center gap-2.5">
           <div className="relative w-8 h-8 rounded-full bg-primary/15 flex items-center justify-center">
             <Bot className="w-4 h-4 text-primary" />
-            <span
-              className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-card transition-colors ${
-                connected ? "bg-primary" : "bg-muted-foreground"
-              }`}
-            />
+            <span className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border-2 border-card transition-colors ${connected ? "bg-primary" : "bg-muted-foreground"}`} />
           </div>
           <div>
             <h2 className="font-semibold tracking-tight leading-tight">Cortex Agent</h2>
             <p className="text-[10px] font-mono text-muted-foreground uppercase tracking-wider">
-              AI · {connected ? "Online" : "Connecting..."}
+              AI · {connected ? "Online" : "Offline"}
             </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
+          {/* Voice toggle */}
+          <button
+            onClick={() => {
+              setVoiceEnabled(v => !v);
+              if (voiceEnabled) window.speechSynthesis?.cancel();
+            }}
+            title={voiceEnabled ? "Mute voice" : "Enable voice"}
+            className={`w-8 h-8 rounded-lg flex items-center justify-center transition-all border ${
+              voiceEnabled
+                ? "bg-primary/15 border-primary/30 text-primary"
+                : "bg-secondary border-border text-muted-foreground"
+            }`}
+          >
+            {voiceEnabled ? <Volume2 className="w-3.5 h-3.5" /> : <VolumeX className="w-3.5 h-3.5" />}
+          </button>
           {connected ? (
             <Wifi className="w-4 h-4 text-primary" />
           ) : (
             <WifiOff className="w-4 h-4 text-muted-foreground" />
           )}
-          <span className="text-xs font-mono text-muted-foreground">v2.4</span>
         </div>
       </div>
 
       {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 py-5 space-y-4">
-        {messages.map((m) => (
-          <MessageBubble key={m.id} msg={m} />
-        ))}
+        {messages.map(m => <MessageBubble key={m.id} msg={m} />)}
         {typing && (
           <div className="flex items-end gap-2">
             <div className="w-7 h-7 rounded-full bg-primary/15 flex items-center justify-center shrink-0">
               <Bot className="w-3.5 h-3.5 text-primary" />
             </div>
             <div className="px-4 py-2.5 rounded-2xl rounded-bl-sm bg-secondary/70 flex gap-1">
-              {[0, 0.15, 0.3].map((d) => (
-                <span
-                  key={d}
-                  className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce"
-                  style={{ animationDelay: `${d}s` }}
-                />
+              {[0, 0.15, 0.3].map(d => (
+                <span key={d} className="w-1.5 h-1.5 rounded-full bg-primary animate-bounce" style={{ animationDelay: `${d}s` }} />
               ))}
             </div>
           </div>
@@ -267,14 +271,13 @@ export const ChatAgent = ({ sessionId }: ChatAgentProps) => {
         <div className="flex items-center gap-2 bg-secondary/60 rounded-xl pl-4 pr-2 py-2 focus-within:ring-2 focus-within:ring-primary/40 transition">
           <input
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && send()}
-            placeholder={listening ? "Listening to your voice..." : "Type your response..."}
+            onChange={e => setInput(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && send()}
+            placeholder={listening ? "Listening..." : "Type or speak your response..."}
             className="flex-1 bg-transparent outline-none text-sm placeholder:text-muted-foreground"
           />
           <button
             onClick={toggleMic}
-            aria-label={listening ? "Stop listening" : "Start voice input"}
             className={`w-9 h-9 rounded-lg flex items-center justify-center transition-all ${
               listening
                 ? "bg-destructive text-destructive-foreground animate-pulse shadow-[0_0_20px_hsl(var(--destructive)/0.6)]"
@@ -296,34 +299,33 @@ export const ChatAgent = ({ sessionId }: ChatAgentProps) => {
   );
 };
 
+// ── Message Bubble ─────────────────────────────────────────────────────────────
 const MessageBubble = ({ msg }: { msg: Message }) => {
   const isAI = msg.sender === "ai";
+  const isRetry = msg.type === "retry";
   return (
     <div className={`flex items-end gap-2 ${isAI ? "" : "flex-row-reverse"}`}>
-      <div
-        className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${
-          isAI ? "bg-primary/15" : "bg-accent/15"
-        }`}
-      >
-        {isAI ? (
-          <Bot className="w-3.5 h-3.5 text-primary" />
-        ) : (
-          <User className="w-3.5 h-3.5 text-accent" />
-        )}
+      <div className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 ${isAI ? "bg-primary/15" : "bg-accent/15"}`}>
+        {isAI ? <Bot className="w-3.5 h-3.5 text-primary" /> : <User className="w-3.5 h-3.5 text-accent" />}
       </div>
-      <div className={`max-w-[75%] flex flex-col ${isAI ? "items-start" : "items-end"}`}>
-        <div
-          className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-line ${
-            isAI
-              ? "bg-secondary/70 rounded-bl-sm"
-              : "bg-accent/15 rounded-br-sm border border-accent/20"
-          }`}
-        >
+      <div className={`max-w-[78%] flex flex-col ${isAI ? "items-start" : "items-end"}`}>
+        <div className={`px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-line ${
+          isRetry
+            ? "bg-amber-500/10 border border-amber-500/30 text-amber-200 rounded-bl-sm"
+            : isAI
+            ? "bg-secondary/70 rounded-bl-sm"
+            : "bg-accent/15 rounded-br-sm border border-accent/20"
+        }`}>
+          {isRetry && <AlertTriangle className="w-3.5 h-3.5 inline mr-1.5 text-amber-400" />}
           {msg.text}
+          {isRetry && msg.retriesLeft !== undefined && (
+            <span className="block mt-1 text-[10px] font-mono text-amber-400/70 flex items-center gap-1">
+              <RefreshCw className="w-2.5 h-2.5 inline" />
+              {msg.retriesLeft} attempt{msg.retriesLeft !== 1 ? "s" : ""} remaining
+            </span>
+          )}
         </div>
-        <span className="text-[10px] font-mono text-muted-foreground mt-1 px-1">
-          {msg.time}
-        </span>
+        <span className="text-[10px] font-mono text-muted-foreground mt-1 px-1">{msg.time}</span>
       </div>
     </div>
   );
