@@ -1,4 +1,4 @@
-import { useRef, useState, useEffect } from "react";
+import { useRef, useState, useEffect, useCallback } from "react";
 import {
   CheckCircle2, ShieldCheck, Sparkles, Loader2,
   FileCheck, ScanFace, CreditCard, PlayCircle,
@@ -35,31 +35,46 @@ const Index = () => {
   const [aadhaarResult, setAadhaarResult] = useState<OCRResult | null>(null);
   const [panResult, setPanResult]         = useState<OCRResult | null>(null);
 
-  // ── Start session on mount ───────────────────────────────────────────────────
+  // ── Start session on mount ─────────────────────────────────────────────
   useEffect(() => {
-    (async () => {
+    // cancelled guard: React StrictMode double-invokes effects in dev.
+    // The cleanup function sets cancelled=true so only the second (real) run proceeds.
+    let cancelled = false;
+    let created   = false;
+
+    const init = async () => {
       try {
         const res  = await fetch(`${BACKEND_URL}/kyc/start`, { method: "POST" });
+        if (cancelled) return; // strict mode cleanup fired — discard
         const data = await res.json();
+        created = true;
         setSessionId(data.session_id);
       } catch {
+        if (cancelled) return;
         toast.error("Backend offline", {
           description: "Running in demo mode. Start backend for full KYC flow.",
         });
         setSessionId(null);
       } finally {
-        setSessionLoading(false);
+        if (!cancelled) setSessionLoading(false);
       }
-    })();
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  // ── Handle step changes from ChatAgent ──────────────────────────────────────
-  const handleStepChange = (step: string, data?: any) => {
+  // ── Handle step changes from ChatAgent ─────────────────────────────────────
+  // useCallback with [] so the reference never changes → no WS reconnect
+  const handleStepChange = useCallback((step: string, _data?: any) => {
     setCurrentStep(step);
-  };
+  }, []);
 
-  // ── Handle OCR results ───────────────────────────────────────────────────────
-  const handleOcrResult = (docType: "aadhaar" | "pan", result: OCRResult) => {
+  // ── Handle OCR results ──────────────────────────────────────────────────────
+  const handleOcrResult = useCallback((docType: "aadhaar" | "pan", result: OCRResult) => {
     if (docType === "aadhaar") {
       setAadhaarResult(result);
       toast.success("Aadhaar scanned", {
@@ -71,7 +86,7 @@ const Index = () => {
         description: result.id_number ? `PAN: ${result.id_number}` : "PAN data extracted",
       });
     }
-  };
+  }, []);
 
   // ── Submit KYC ───────────────────────────────────────────────────────────────
   const submitKYC = async () => {
