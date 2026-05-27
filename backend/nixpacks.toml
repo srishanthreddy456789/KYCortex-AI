@@ -1,7 +1,7 @@
 [phases.setup]
-# Only install Tesseract as a system package.
-# Nixpacks auto-detects Python from requirements.txt and handles pip itself.
-nixPkgs = ["tesseract"]
+# Use apt packages for system deps — this lets Nixpacks auto-detect
+# Python from requirements.txt without conflicts
+aptPkgs = ["tesseract-ocr", "tesseract-ocr-eng", "libgl1", "libglib2.0-0"]
 
 [start]
 cmd = "uvicorn app:app --host 0.0.0.0 --port $PORT"
